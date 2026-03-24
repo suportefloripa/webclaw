@@ -3,6 +3,13 @@
 All notable changes to webclaw are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.2] — 2026-03-24
+
+### Fixed
+- Reddit scraping: use plain HTTP client for `.json` endpoint (TLS fingerprinting was getting blocked)
+
+---
+
 ## [0.1.1] — 2026-03-24
 
 ### Fixed
