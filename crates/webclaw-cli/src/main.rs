@@ -962,7 +962,10 @@ async fn run_crawl(cli: &Cli) -> Result<(), String> {
     );
 
     if result.errors > 0 {
-        Err(format!("{} of {} pages failed", result.errors, result.total))
+        Err(format!(
+            "{} of {} pages failed",
+            result.errors, result.total
+        ))
     } else {
         Ok(())
     }

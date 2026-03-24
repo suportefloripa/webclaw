@@ -45,7 +45,9 @@ fn validate_url(url: &str) -> Result<(), String> {
             "Invalid URL: scheme '{}' not allowed, must start with http:// or https://",
             parsed.scheme()
         )),
-        Err(e) => Err(format!("Invalid URL: {e}. Must start with http:// or https://")),
+        Err(e) => Err(format!(
+            "Invalid URL: {e}. Must start with http:// or https://"
+        )),
     }
 }
 
@@ -396,10 +398,7 @@ impl WebclawMcp {
             SmartFetchResult::Cloud(resp) => {
                 // Extract markdown from the cloud response and build a minimal
                 // ExtractionResult so we can compute the diff locally.
-                let markdown = resp
-                    .get("markdown")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let markdown = resp.get("markdown").and_then(|v| v.as_str()).unwrap_or("");
 
                 if markdown.is_empty() {
                     return Err(
