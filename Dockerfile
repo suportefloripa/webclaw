@@ -46,11 +46,10 @@ RUN touch crates/*/src/*.rs \
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime image
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy both binaries
