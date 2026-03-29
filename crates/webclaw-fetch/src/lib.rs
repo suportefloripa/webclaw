@@ -6,9 +6,9 @@ pub mod client;
 pub mod crawler;
 pub mod document;
 pub mod error;
-pub(crate) mod linkedin;
+pub mod linkedin;
 pub mod proxy;
-pub(crate) mod reddit;
+pub mod reddit;
 pub mod sitemap;
 
 pub use browser::BrowserProfile;
