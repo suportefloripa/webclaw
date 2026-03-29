@@ -1,6 +1,5 @@
 /// Browser fingerprint selection and rotation.
-/// Maps our simple `BrowserProfile` enum to primp's impersonation profiles.
-use primp::{Impersonate, ImpersonateOS};
+/// Maps our BrowserProfile enum to webclaw-http client builder methods.
 
 /// Which browser identity to present at the TLS/HTTP layer.
 #[derive(Debug, Clone, Default)]
@@ -12,85 +11,41 @@ pub enum BrowserProfile {
     Random,
 }
 
-/// A complete impersonation profile: browser + OS.
-#[derive(Debug, Clone)]
-pub struct ImpersonateProfile {
-    pub browser: Impersonate,
-    pub os: ImpersonateOS,
+/// A browser variant for building webclaw-http clients.
+#[derive(Debug, Clone, Copy)]
+pub enum BrowserVariant {
+    Chrome,
+    ChromeMacos,
+    Firefox,
+    Safari,
+    Edge,
 }
 
-/// All Chrome profiles we ship, newest first.
-pub fn chrome_profiles() -> Vec<ImpersonateProfile> {
+/// All Chrome variants we ship.
+pub fn chrome_variants() -> Vec<BrowserVariant> {
+    vec![BrowserVariant::Chrome, BrowserVariant::ChromeMacos]
+}
+
+/// All Firefox variants we ship.
+pub fn firefox_variants() -> Vec<BrowserVariant> {
+    vec![BrowserVariant::Firefox]
+}
+
+/// All variants for maximum diversity in Random mode.
+pub fn all_variants() -> Vec<BrowserVariant> {
     vec![
-        ImpersonateProfile {
-            browser: Impersonate::ChromeV145,
-            os: ImpersonateOS::Windows,
-        },
-        ImpersonateProfile {
-            browser: Impersonate::ChromeV145,
-            os: ImpersonateOS::MacOS,
-        },
-        ImpersonateProfile {
-            browser: Impersonate::ChromeV144,
-            os: ImpersonateOS::Windows,
-        },
-        ImpersonateProfile {
-            browser: Impersonate::ChromeV144,
-            os: ImpersonateOS::Linux,
-        },
+        BrowserVariant::Chrome,
+        BrowserVariant::ChromeMacos,
+        BrowserVariant::Firefox,
+        BrowserVariant::Safari,
+        BrowserVariant::Edge,
     ]
 }
 
-/// All Firefox profiles we ship, newest first.
-pub fn firefox_profiles() -> Vec<ImpersonateProfile> {
-    vec![
-        ImpersonateProfile {
-            browser: Impersonate::FirefoxV146,
-            os: ImpersonateOS::Windows,
-        },
-        ImpersonateProfile {
-            browser: Impersonate::FirefoxV146,
-            os: ImpersonateOS::Linux,
-        },
-        ImpersonateProfile {
-            browser: Impersonate::FirefoxV140,
-            os: ImpersonateOS::Windows,
-        },
-    ]
+pub fn latest_chrome() -> BrowserVariant {
+    BrowserVariant::Chrome
 }
 
-/// Safari + Edge + Opera profiles for maximum diversity in Random mode.
-pub fn extra_profiles() -> Vec<ImpersonateProfile> {
-    vec![
-        ImpersonateProfile {
-            browser: Impersonate::SafariV18_5,
-            os: ImpersonateOS::MacOS,
-        },
-        ImpersonateProfile {
-            browser: Impersonate::SafariV26,
-            os: ImpersonateOS::MacOS,
-        },
-        ImpersonateProfile {
-            browser: Impersonate::EdgeV145,
-            os: ImpersonateOS::Windows,
-        },
-        ImpersonateProfile {
-            browser: Impersonate::OperaV127,
-            os: ImpersonateOS::Windows,
-        },
-    ]
-}
-
-pub fn latest_chrome() -> ImpersonateProfile {
-    ImpersonateProfile {
-        browser: Impersonate::SafariV26,
-        os: ImpersonateOS::MacOS,
-    }
-}
-
-pub fn latest_firefox() -> ImpersonateProfile {
-    ImpersonateProfile {
-        browser: Impersonate::FirefoxV146,
-        os: ImpersonateOS::Windows,
-    }
+pub fn latest_firefox() -> BrowserVariant {
+    BrowserVariant::Firefox
 }

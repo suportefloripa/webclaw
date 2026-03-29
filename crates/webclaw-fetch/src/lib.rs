@@ -1,15 +1,14 @@
-/// webclaw-fetch: HTTP client layer with browser TLS fingerprint impersonation.
-/// Uses Impit under the hood to make requests that look like real
-/// browsers at the TLS, HTTP/2, and header levels.
-/// Automatically detects PDF responses and delegates to webclaw-pdf.
+//! webclaw-fetch: HTTP client layer with browser TLS fingerprint impersonation.
+//! Uses webclaw-http for browser-grade TLS + HTTP/2 fingerprinting.
+//! Automatically detects PDF responses and delegates to webclaw-pdf.
 pub mod browser;
 pub mod client;
 pub mod crawler;
 pub mod document;
 pub mod error;
-pub mod linkedin;
+pub(crate) mod linkedin;
 pub mod proxy;
-pub mod reddit;
+pub(crate) mod reddit;
 pub mod sitemap;
 
 pub use browser::BrowserProfile;

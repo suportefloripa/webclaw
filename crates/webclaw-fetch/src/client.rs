@@ -1,6 +1,6 @@
 /// HTTP client with browser TLS fingerprint impersonation.
-/// Wraps primp to provide a simple fetch interface with optional
-/// content extraction via webclaw-core. Supports single and batch operations.
+/// Uses webclaw-http for browser-grade TLS + HTTP/2 fingerprinting.
+/// Supports single and batch operations with proxy rotation.
 /// Automatically detects PDF responses and extracts text via webclaw-pdf.
 ///
 /// Two proxy modes:
@@ -17,7 +17,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, instrument, warn};
 use webclaw_pdf::PdfMode;
 
-use crate::browser::{self, BrowserProfile, ImpersonateProfile};
+use crate::browser::{self, BrowserProfile, BrowserVariant};
 use crate::error::FetchError;
 
 /// Configuration for building a [`FetchClient`].
@@ -83,20 +83,22 @@ enum ClientPool {
     /// Pre-built clients with a fixed proxy (or no proxy).
     /// Fingerprint rotation still works via the pool when `random` is true.
     Static {
-        clients: Vec<primp::Client>,
+        clients: Vec<webclaw_http::Client>,
         random: bool,
     },
     /// Pre-built pool of clients, each with a different proxy + fingerprint.
     /// Requests pick a client deterministically by host for HTTP/2 connection reuse.
-    Rotating { clients: Vec<primp::Client> },
+    Rotating {
+        clients: Vec<webclaw_http::Client>,
+    },
 }
 
-/// HTTP client that impersonates browser TLS fingerprints via primp.
+/// HTTP client with browser TLS + HTTP/2 fingerprinting via webclaw-http.
 ///
 /// Operates in two modes:
-/// - **Static pool**: pre-built primp clients, optionally with fingerprint rotation.
+/// - **Static pool**: pre-built clients, optionally with fingerprint rotation.
 ///   Used when no `proxy_pool` is configured. Fast (no per-request construction).
-/// - **Rotating pool**: pre-built primp clients, one per proxy in the pool.
+/// - **Rotating pool**: pre-built clients, one per proxy in the pool.
 ///   Same-host URLs are routed to the same client for HTTP/2 multiplexing.
 pub struct FetchClient {
     pool: ClientPool,
@@ -106,20 +108,20 @@ pub struct FetchClient {
 impl FetchClient {
     /// Build a new client from config.
     ///
-    /// When `config.proxy_pool` is non-empty, pre-builds one primp client per proxy,
+    /// When `config.proxy_pool` is non-empty, pre-builds one client per proxy,
     /// each with a randomly assigned fingerprint. Same-host URLs get routed to the
     /// same client for HTTP/2 connection reuse.
     ///
-    /// When `proxy_pool` is empty, pre-builds primp clients at construction time
+    /// When `proxy_pool` is empty, pre-builds clients at construction time
     /// (one per fingerprint for `Random` profiles, one for fixed profiles).
     pub fn new(config: FetchConfig) -> Result<Self, FetchError> {
-        let profiles = collect_profiles(&config.browser);
+        let variants = collect_variants(&config.browser);
         let pdf_mode = config.pdf_mode.clone();
 
         let pool = if config.proxy_pool.is_empty() {
-            let clients = profiles
+            let clients = variants
                 .into_iter()
-                .map(|p| build_primp_client(&config, &p, config.proxy.as_deref()))
+                .map(|v| build_client(&config, v, config.proxy.as_deref()))
                 .collect::<Result<Vec<_>, _>>()?;
 
             let random = matches!(config.browser, BrowserProfile::Random);
@@ -136,14 +138,13 @@ impl FetchClient {
                 .proxy_pool
                 .iter()
                 .map(|proxy| {
-                    let p = profiles.choose(&mut rng).unwrap().clone();
-                    build_primp_client(&config, &p, Some(proxy))
+                    let v = *variants.choose(&mut rng).unwrap();
+                    build_client(&config, v, Some(proxy))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
             debug!(
                 clients = clients.len(),
-                profiles = profiles.len(),
                 "fetch client ready (pre-built rotating pool)"
             );
 
@@ -206,91 +207,13 @@ impl FetchClient {
         Err(last_err.unwrap_or_else(|| FetchError::Build("all retries exhausted".into())))
     }
 
-    /// Single fetch attempt with automatic plain-client fallback.
-    ///
-    /// If the TLS-impersonated client fails with a connection error or gets a 403,
-    /// retries with a plain client (no impersonation). Some sites (e.g. ycombinator.com)
-    /// reject forged TLS fingerprints but accept default rustls connections.
+    /// Single fetch attempt. Uses the TLS-impersonated client from the pool.
     async fn fetch_once(&self, url: &str) -> Result<FetchResult, FetchError> {
         let start = Instant::now();
+        let client = self.pick_client(url);
 
-        let client = match &self.pool {
-            ClientPool::Static { clients, random } => {
-                if *random {
-                    let host = extract_host(url);
-                    pick_for_host(clients, &host)
-                } else {
-                    &clients[0]
-                }
-            }
-            ClientPool::Rotating { clients } => pick_random(clients),
-        };
-
-        // Try impersonated client first
-        let needs_plain_fallback = match client.get(url).send().await {
-            Ok(response) => {
-                let status = response.status().as_u16();
-                if status == 403 {
-                    debug!(url, "impersonated client got 403, trying plain fallback");
-                    true
-                } else {
-                    return Self::response_to_result(response, start).await;
-                }
-            }
-            Err(_e) => {
-                debug!(
-                    url,
-                    "impersonated client connection failed, trying plain fallback"
-                );
-                true
-            }
-        };
-
-        // Plain client fallback (no TLS impersonation)
-        if needs_plain_fallback {
-            let plain = primp::Client::builder()
-                .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
-                .cookie_store(true)
-                .timeout(Duration::from_secs(30))
-                .build()
-                .map_err(|e| FetchError::Build(format!("plain client: {e}")))?;
-
-            let response = plain.get(url).send().await?;
-            return Self::response_to_result(response, start).await;
-        }
-
-        unreachable!()
-    }
-
-    /// Convert a primp Response into a FetchResult.
-    async fn response_to_result(
-        response: primp::Response,
-        start: Instant,
-    ) -> Result<FetchResult, FetchError> {
-        let status = response.status().as_u16();
-        let final_url = response.url().to_string();
-
-        let headers: HashMap<String, String> = response
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
-
-        let html = response
-            .text()
-            .await
-            .map_err(|e| FetchError::BodyDecode(e.to_string()))?;
-
-        let elapsed = start.elapsed();
-        debug!(status, elapsed_ms = %elapsed.as_millis(), "fetch complete");
-
-        Ok(FetchResult {
-            html,
-            status,
-            url: final_url,
-            headers,
-            elapsed,
-        })
+        let response = client.get(url).await?;
+        response_to_result(response, start)
     }
 
     /// Fetch a URL then extract structured content.
@@ -307,10 +230,6 @@ impl FetchClient {
     }
 
     /// Fetch a URL then extract structured content with custom extraction options.
-    ///
-    /// Same as [`fetch_and_extract`] but accepts `ExtractionOptions` for CSS selector
-    /// filtering, main-content-only mode, etc. Options only apply to HTML responses;
-    /// PDF extraction ignores them (no DOM to filter).
     #[instrument(skip(self, options), fields(url = %url))]
     pub async fn fetch_and_extract_with_options(
         &self,
@@ -318,24 +237,15 @@ impl FetchClient {
         options: &webclaw_core::ExtractionOptions,
     ) -> Result<webclaw_core::ExtractionResult, FetchError> {
         // Reddit fallback: use their JSON API to get post + full comment tree.
-        // Uses a plain reqwest client — Reddit's JSON endpoint blocks TLS-fingerprinted clients
-        // but accepts standard requests with a browser User-Agent.
         if crate::reddit::is_reddit_url(url) {
             let json_url = crate::reddit::json_url(url);
             debug!("reddit detected, fetching {json_url}");
 
-            let plain = primp::Client::builder()
-                .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .map_err(|e| FetchError::Build(format!("reddit client: {e}")))?;
-            let response = plain.get(&json_url).send().await?;
-            if response.status().is_success() {
-                let bytes = response
-                    .bytes()
-                    .await
-                    .map_err(|e| FetchError::BodyDecode(e.to_string()))?;
-                match crate::reddit::parse_reddit_json(&bytes, url) {
+            let client = self.pick_client(url);
+            let response = client.get(&json_url).await?;
+            if response.is_success() {
+                let bytes = response.body();
+                match crate::reddit::parse_reddit_json(bytes, url) {
                     Ok(result) => return Ok(result),
                     Err(e) => warn!("reddit json fallback failed: {e}, falling back to HTML"),
                 }
@@ -344,50 +254,19 @@ impl FetchClient {
 
         let start = Instant::now();
         let client = self.pick_client(url);
+        let response = client.get(url).await?;
 
-        // Try impersonated client, fall back to plain on connection error or 403
-        let response = match client.get(url).send().await {
-            Ok(resp) if resp.status().as_u16() == 403 => {
-                debug!(url, "impersonated client got 403, trying plain fallback");
-                let plain = primp::Client::builder()
-                    .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
-                    .cookie_store(true)
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                    .map_err(|e| FetchError::Build(format!("plain fallback: {e}")))?;
-                plain.get(url).send().await?
-            }
-            Ok(resp) => resp,
-            Err(_e) => {
-                debug!(url, "impersonated client failed, trying plain fallback");
-                let plain = primp::Client::builder()
-                    .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
-                    .cookie_store(true)
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                    .map_err(|e| FetchError::Build(format!("plain fallback: {e}")))?;
-                plain.get(url).send().await?
-            }
-        };
-
-        let status = response.status().as_u16();
+        let status = response.status();
         let final_url = response.url().to_string();
 
-        let headers: HashMap<String, String> = response
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
+        let headers: HashMap<String, String> = response.headers().clone();
 
         let is_pdf = is_pdf_content_type(&headers);
 
         if is_pdf {
             debug!(status, "detected PDF response, using pdf extraction");
 
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| FetchError::BodyDecode(e.to_string()))?;
+            let bytes = response.body();
 
             let elapsed = start.elapsed();
             debug!(
@@ -397,17 +276,14 @@ impl FetchClient {
                 "PDF fetch complete"
             );
 
-            let pdf_result = webclaw_pdf::extract_pdf(&bytes, self.pdf_mode.clone())?;
+            let pdf_result = webclaw_pdf::extract_pdf(bytes, self.pdf_mode.clone())?;
             Ok(pdf_to_extraction_result(&pdf_result, &final_url))
         } else if let Some(doc_type) =
             crate::document::is_document_content_type(&headers, &final_url)
         {
             debug!(status, doc_type = ?doc_type, "detected document response, extracting");
 
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| FetchError::BodyDecode(e.to_string()))?;
+            let bytes = response.body();
 
             let elapsed = start.elapsed();
             debug!(
@@ -417,14 +293,11 @@ impl FetchClient {
                 "document fetch complete"
             );
 
-            let mut result = crate::document::extract_document(&bytes, doc_type)?;
+            let mut result = crate::document::extract_document(bytes, doc_type)?;
             result.metadata.url = Some(final_url);
             Ok(result)
         } else {
-            let html = response
-                .text()
-                .await
-                .map_err(|e| FetchError::BodyDecode(e.to_string()))?;
+            let html = response.text().into_owned();
 
             let elapsed = start.elapsed();
             debug!(status, elapsed_ms = %elapsed.as_millis(), "fetch complete");
@@ -440,21 +313,11 @@ impl FetchClient {
 
             let extraction = webclaw_core::extract_with_options(&html, Some(&final_url), options)?;
 
-            // YouTube transcript: caption URLs are IP-signed and expire immediately,
-            // so the timedtext endpoint returns empty responses. The innertube
-            // get_transcript API requires cookies/consent. Transcript extraction
-            // will be enabled via the cloud API (JS rendering + cookie jar).
-            // The extraction functions exist in webclaw_core::youtube but are not
-            // wired up here until we have a reliable fetch path.
-
             Ok(extraction)
         }
     }
 
     /// Fetch multiple URLs concurrently with bounded parallelism.
-    ///
-    /// Spawns one task per URL, bounded by a semaphore. Results are returned
-    /// in the same order as the input URLs, regardless of completion order.
     pub async fn fetch_batch(
         self: &Arc<Self>,
         urls: &[&str],
@@ -479,9 +342,6 @@ impl FetchClient {
     }
 
     /// Fetch and extract multiple URLs concurrently with bounded parallelism.
-    ///
-    /// Same semantics as [`fetch_batch`] but runs extraction on each response.
-    /// Results preserve input URL order.
     pub async fn fetch_and_extract_batch(
         self: &Arc<Self>,
         urls: &[&str],
@@ -496,9 +356,6 @@ impl FetchClient {
     }
 
     /// Fetch and extract multiple URLs concurrently with custom extraction options.
-    ///
-    /// Same as [`fetch_and_extract_batch`] but applies the given options
-    /// (include/exclude selectors, only-main-content, etc.) to each extraction.
     pub async fn fetch_and_extract_batch_with_options(
         self: &Arc<Self>,
         urls: &[&str],
@@ -533,7 +390,7 @@ impl FetchClient {
     }
 
     /// Pick a client from the pool for a given URL.
-    fn pick_client(&self, url: &str) -> &primp::Client {
+    fn pick_client(&self, url: &str) -> &webclaw_http::Client {
         match &self.pool {
             ClientPool::Static { clients, random } => {
                 if *random {
@@ -548,19 +405,35 @@ impl FetchClient {
     }
 }
 
-/// Collect the impersonation profiles to use based on the browser profile.
-fn collect_profiles(profile: &BrowserProfile) -> Vec<ImpersonateProfile> {
+/// Collect the browser variants to use based on the browser profile.
+fn collect_variants(profile: &BrowserProfile) -> Vec<BrowserVariant> {
     match profile {
-        BrowserProfile::Random => {
-            let mut profiles = Vec::new();
-            profiles.extend(browser::chrome_profiles());
-            profiles.extend(browser::firefox_profiles());
-            profiles.extend(browser::extra_profiles());
-            profiles
-        }
+        BrowserProfile::Random => browser::all_variants(),
         BrowserProfile::Chrome => vec![browser::latest_chrome()],
         BrowserProfile::Firefox => vec![browser::latest_firefox()],
     }
+}
+
+/// Convert a webclaw-http Response into a FetchResult.
+fn response_to_result(
+    response: webclaw_http::Response,
+    start: Instant,
+) -> Result<FetchResult, FetchError> {
+    let status = response.status();
+    let final_url = response.url().to_string();
+    let headers = response.headers().clone();
+    let html = response.into_text();
+    let elapsed = start.elapsed();
+
+    debug!(status, elapsed_ms = %elapsed.as_millis(), "fetch complete");
+
+    Ok(FetchResult {
+        html,
+        status,
+        url: final_url,
+        headers,
+        elapsed,
+    })
 }
 
 /// Extract the host from a URL, returning empty string on parse failure.
@@ -573,7 +446,10 @@ fn extract_host(url: &str) -> String {
 
 /// Pick a client deterministically based on a host string.
 /// Same host always gets the same client, enabling HTTP/2 connection reuse.
-fn pick_for_host<'a>(clients: &'a [primp::Client], host: &str) -> &'a primp::Client {
+fn pick_for_host<'a>(
+    clients: &'a [webclaw_http::Client],
+    host: &str,
+) -> &'a webclaw_http::Client {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     host.hash(&mut hasher);
     let idx = (hasher.finish() as usize) % clients.len();
@@ -581,10 +457,39 @@ fn pick_for_host<'a>(clients: &'a [primp::Client], host: &str) -> &'a primp::Cli
 }
 
 /// Pick a random client from the pool for per-request rotation.
-fn pick_random(clients: &[primp::Client]) -> &primp::Client {
+fn pick_random(clients: &[webclaw_http::Client]) -> &webclaw_http::Client {
     use rand::Rng;
     let idx = rand::thread_rng().gen_range(0..clients.len());
     &clients[idx]
+}
+
+/// Build a webclaw-http Client from config + browser variant + optional proxy.
+fn build_client(
+    config: &FetchConfig,
+    variant: BrowserVariant,
+    proxy: Option<&str>,
+) -> Result<webclaw_http::Client, FetchError> {
+    let mut builder = match variant {
+        BrowserVariant::Chrome => webclaw_http::Client::builder().chrome(),
+        BrowserVariant::ChromeMacos => webclaw_http::Client::builder().chrome_macos(),
+        BrowserVariant::Firefox => webclaw_http::Client::builder().firefox(),
+        BrowserVariant::Safari => webclaw_http::Client::builder().safari(),
+        BrowserVariant::Edge => webclaw_http::Client::builder().edge(),
+    };
+
+    builder = builder.timeout(config.timeout);
+
+    for (k, v) in &config.headers {
+        builder = builder.default_header(k, v);
+    }
+
+    if let Some(proxy_url) = proxy {
+        builder = builder
+            .proxy(proxy_url)
+            .map_err(|e| FetchError::Build(format!("proxy: {e}")))?;
+    }
+
+    builder.build().map_err(|e| FetchError::Build(e.to_string()))
 }
 
 /// Status codes worth retrying: server errors + rate limiting.
@@ -668,46 +573,6 @@ async fn collect_ordered<T>(
     }
 
     slots.into_iter().flatten().collect()
-}
-
-/// Build a single primp Client from config + impersonation profile + optional proxy.
-fn build_primp_client(
-    config: &FetchConfig,
-    profile: &ImpersonateProfile,
-    proxy: Option<&str>,
-) -> Result<primp::Client, FetchError> {
-    let redirect_policy = if config.follow_redirects {
-        primp::redirect::Policy::limited(config.max_redirects as usize)
-    } else {
-        primp::redirect::Policy::none()
-    };
-
-    let mut headers = primp::header::HeaderMap::new();
-    for (k, v) in &config.headers {
-        if let (Ok(name), Ok(val)) = (
-            primp::header::HeaderName::from_bytes(k.as_bytes()),
-            primp::header::HeaderValue::from_str(v),
-        ) {
-            headers.insert(name, val);
-        }
-    }
-
-    let mut builder = primp::Client::builder()
-        .impersonate(profile.browser)
-        .impersonate_os(profile.os)
-        .cookie_store(true)
-        .timeout(config.timeout)
-        .redirect(redirect_policy)
-        .default_headers(headers);
-
-    if let Some(proxy_url) = proxy {
-        builder = builder
-            .proxy(primp::Proxy::all(proxy_url).map_err(|e| FetchError::Build(e.to_string()))?);
-    }
-
-    builder
-        .build()
-        .map_err(|e| FetchError::Build(e.to_string()))
 }
 
 #[cfg(test)]

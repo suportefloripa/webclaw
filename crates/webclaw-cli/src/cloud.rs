@@ -3,6 +3,11 @@
 /// When WEBCLAW_API_KEY is set (or --api-key is passed), the CLI can fall back
 /// to api.webclaw.io for bot-protected or JS-rendered sites. With --cloud flag,
 /// all requests go through the cloud API directly.
+///
+/// NOTE: The canonical, full-featured cloud module lives in webclaw-mcp/src/cloud.rs
+/// (smart_fetch, bot detection, JS rendering checks). This is the minimal subset
+/// needed by the CLI. Kept separate to avoid pulling in rmcp via webclaw-mcp.
+/// and adding webclaw-mcp as a dependency would pull in rmcp.
 use serde_json::{Value, json};
 
 const API_BASE: &str = "https://api.webclaw.io/v1";
@@ -51,46 +56,6 @@ impl CloudClient {
         self.post("scrape", body).await
     }
 
-    /// Summarize via cloud API.
-    pub async fn summarize(
-        &self,
-        url: &str,
-        max_sentences: Option<usize>,
-    ) -> Result<Value, String> {
-        let mut body = json!({ "url": url });
-        if let Some(n) = max_sentences {
-            body["max_sentences"] = json!(n);
-        }
-        self.post("summarize", body).await
-    }
-
-    /// Brand extraction via cloud API.
-    pub async fn brand(&self, url: &str) -> Result<Value, String> {
-        self.post("brand", json!({ "url": url })).await
-    }
-
-    /// Diff via cloud API.
-    pub async fn diff(&self, url: &str) -> Result<Value, String> {
-        self.post("diff", json!({ "url": url })).await
-    }
-
-    /// Extract via cloud API.
-    pub async fn extract(
-        &self,
-        url: &str,
-        schema: Option<&str>,
-        prompt: Option<&str>,
-    ) -> Result<Value, String> {
-        let mut body = json!({ "url": url });
-        if let Some(s) = schema {
-            body["schema"] = serde_json::from_str(s).unwrap_or(json!(s));
-        }
-        if let Some(p) = prompt {
-            body["prompt"] = json!(p);
-        }
-        self.post("extract", body).await
-    }
-
     async fn post(&self, endpoint: &str, body: Value) -> Result<Value, String> {
         let resp = self
             .http
@@ -112,59 +77,4 @@ impl CloudClient {
             .await
             .map_err(|e| format!("cloud API response parse failed: {e}"))
     }
-}
-
-/// Check if HTML is a bot protection challenge page.
-pub fn is_bot_protected(html: &str) -> bool {
-    let html_lower = html.to_lowercase();
-
-    // Cloudflare
-    if html_lower.contains("_cf_chl_opt") || html_lower.contains("challenge-platform") {
-        return true;
-    }
-    if (html_lower.contains("just a moment") || html_lower.contains("checking your browser"))
-        && html_lower.contains("cf-spinner")
-    {
-        return true;
-    }
-    if (html_lower.contains("cf-turnstile")
-        || html_lower.contains("challenges.cloudflare.com/turnstile"))
-        && html.len() < 100_000
-    {
-        return true;
-    }
-
-    // DataDome
-    if html_lower.contains("geo.captcha-delivery.com") {
-        return true;
-    }
-
-    // AWS WAF
-    if html_lower.contains("awswaf-captcha") {
-        return true;
-    }
-
-    false
-}
-
-/// Check if a page likely needs JS rendering.
-pub fn needs_js_rendering(word_count: usize, html: &str) -> bool {
-    let has_scripts = html.contains("<script");
-
-    if word_count < 50 && html.len() > 5_000 && has_scripts {
-        return true;
-    }
-
-    if word_count < 800 && html.len() > 50_000 && has_scripts {
-        let html_lower = html.to_lowercase();
-        if html_lower.contains("react-app")
-            || html_lower.contains("id=\"__next\"")
-            || html_lower.contains("id=\"root\"")
-            || html_lower.contains("id=\"app\"")
-        {
-            return true;
-        }
-    }
-
-    false
 }
