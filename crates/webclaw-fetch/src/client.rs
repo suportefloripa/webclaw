@@ -641,7 +641,10 @@ mod tests {
         headers.insert("content-type", "application/pdf".parse().unwrap());
         assert!(is_pdf_content_type(&headers));
 
-        headers.insert("content-type", "application/pdf; charset=utf-8".parse().unwrap());
+        headers.insert(
+            "content-type",
+            "application/pdf; charset=utf-8".parse().unwrap(),
+        );
         assert!(is_pdf_content_type(&headers));
 
         headers.insert("content-type", "Application/PDF".parse().unwrap());
