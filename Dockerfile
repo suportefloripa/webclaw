@@ -23,6 +23,7 @@ COPY crates/webclaw-llm/Cargo.toml crates/webclaw-llm/Cargo.toml
 COPY crates/webclaw-pdf/Cargo.toml crates/webclaw-pdf/Cargo.toml
 COPY crates/webclaw-mcp/Cargo.toml crates/webclaw-mcp/Cargo.toml
 COPY crates/webclaw-cli/Cargo.toml crates/webclaw-cli/Cargo.toml
+COPY crates/webclaw-api/Cargo.toml crates/webclaw-api/Cargo.toml
 
 # RUSTFLAGS (reqwest_unstable) — required by Impit's patched rustls
 COPY .cargo .cargo
@@ -33,7 +34,8 @@ RUN mkdir -p crates/webclaw-core/src && echo "" > crates/webclaw-core/src/lib.rs
     && mkdir -p crates/webclaw-llm/src && echo "" > crates/webclaw-llm/src/lib.rs \
     && mkdir -p crates/webclaw-pdf/src && echo "" > crates/webclaw-pdf/src/lib.rs \
     && mkdir -p crates/webclaw-mcp/src && echo "fn main() {}" > crates/webclaw-mcp/src/main.rs \
-    && mkdir -p crates/webclaw-cli/src && echo "fn main() {}" > crates/webclaw-cli/src/main.rs
+    && mkdir -p crates/webclaw-cli/src && echo "fn main() {}" > crates/webclaw-cli/src/main.rs \
+    && mkdir -p crates/webclaw-api/src && echo "fn main() {}" > crates/webclaw-api/src/main.rs
 
 # Pre-build dependencies (this layer is cached until Cargo.toml/lock changes)
 RUN cargo build --release 2>/dev/null || true
@@ -52,9 +54,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy both binaries
+# Copy all binaries
 COPY --from=builder /build/target/release/webclaw /usr/local/bin/webclaw
 COPY --from=builder /build/target/release/webclaw-mcp /usr/local/bin/webclaw-mcp
+COPY --from=builder /build/target/release/webclaw-api /usr/local/bin/webclaw-api
 
 # Default: run the CLI
 CMD ["webclaw"]
