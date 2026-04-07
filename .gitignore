@@ -3,4 +3,7 @@ target/
 .env
 .claude/
 .codex/
+.codex
 AGENTS.md
+Iniciar.md
+proxies (1).txt
