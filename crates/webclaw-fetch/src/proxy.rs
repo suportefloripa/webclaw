@@ -5,17 +5,28 @@
 /// Also accepts `host:port` (no auth).
 use crate::error::FetchError;
 
+/// URL-encode a string for use in proxy authentication.
+/// Handles special characters like `+`, `@`, `:`, etc.
+fn url_encode(s: &str) -> String {
+    urlencoding::encode(s).into_owned()
+}
+
 /// Parse a single proxy line into an HTTP proxy URL.
 ///
 /// Accepts two formats:
 /// - `host:port:user:pass` -> `http://user:pass@host:port`
 /// - `host:port` -> `http://host:port`
+///
+/// Username and password are URL-encoded to handle special characters.
 pub fn parse_proxy_line(line: &str) -> Option<String> {
     let parts: Vec<&str> = line.trim().splitn(4, ':').collect();
     match parts.len() {
         4 => Some(format!(
             "http://{}:{}@{}:{}",
-            parts[2], parts[3], parts[0], parts[1]
+            url_encode(parts[2]),
+            url_encode(parts[3]),
+            parts[0],
+            parts[1]
         )),
         2 => Some(format!("http://{}:{}", parts[0], parts[1])),
         _ => None,
@@ -75,6 +86,23 @@ mod tests {
     fn parse_trims_whitespace() {
         let result = parse_proxy_line("  host:9999:user:pass  ");
         assert_eq!(result.as_deref(), Some("http://user:pass@host:9999"));
+    }
+
+    #[test]
+    fn parse_url_encodes_special_chars() {
+        // Test with + characters in password
+        let result = parse_proxy_line("host:8080:user:pass++word");
+        assert_eq!(result.as_deref(), Some("http://user:pass%2B%2Bword@host:8080"));
+
+        // Test with @ in username
+        let result = parse_proxy_line("host:8080:user@email:pass");
+        assert_eq!(result.as_deref(), Some("http://user%40email:pass@host:8080"));
+
+        // Test with : in password (would break parsing, but encoding should handle it)
+        let result = parse_proxy_line("host:8080:user:pass:word");
+        // This parses as host:port:user:pass:word -> 4 parts after splitn(4)
+        // parts[0]=host, parts[1]=8080, parts[2]=user, parts[3]=pass:word
+        assert_eq!(result.as_deref(), Some("http://user:pass%3Aword@host:8080"));
     }
 
     #[test]
