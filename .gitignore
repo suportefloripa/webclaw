@@ -1,5 +1,6 @@
 target/
 .DS_Store
 .env
-proxies.txt
-.claude/skills/
+.claude/
+.codex/
+AGENTS.md
