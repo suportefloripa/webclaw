@@ -54,10 +54,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Set default log level
+ENV RUST_LOG=info
+
+# Set working directory for proxy file auto-detection
+WORKDIR /app
+
 # Copy all binaries
 COPY --from=builder /build/target/release/webclaw /usr/local/bin/webclaw
 COPY --from=builder /build/target/release/webclaw-mcp /usr/local/bin/webclaw-mcp
 COPY --from=builder /build/target/release/webclaw-api /usr/local/bin/webclaw-api
+
+# Copy proxy pool file if present (proxies.txt in project root)
+# For production deployments, consider using WEBCLAW_PROXY env var instead
+# Hack: .dockerignore is always present, ensuring COPY always succeeds
+COPY --chown=root:root .dockerignore proxies.tx[t] ./
 
 # Default: run the CLI
 CMD ["webclaw"]

@@ -7,6 +7,30 @@
 - A [Dokploy](https://dokploy.com/) instance running on your server.
 - The webclaw repository connected to your Dokploy (via GitHub or local upload).
 
+## Proxy Configuration
+
+webclaw-api supports proxy rotation for bypassing rate limits and IP restrictions.
+
+### Option 1: Single Proxy (Environment Variable)
+
+Set `WEBCLAW_PROXY` in Environment Settings:
+```
+WEBCLAW_PROXY=http://user:pass@host:port
+```
+
+### Option 2: Proxy Pool (Volume Mount)
+
+Create a `proxies.txt` file and mount it. This allows updating proxies without rebuilding the image:
+```bash
+-v /path/to/proxies.txt:/app/proxies.txt
+```
+
+### Option 3: Proxy Pool (Automatic/Bundled) - RECOMMENDED for Dokploy
+
+If you have a `proxies.txt` in your repository root when building the Docker image (e.g., via Dokploy's automated builds), it will be automatically copied into the image. No volume mount or configuration is required. This is the simplest way to manage proxies in automated deployments.
+
+The proxy pool rotates automatically on each request.
+
 ## Deployment Steps
 
 1.  **Create a New Application**: 
